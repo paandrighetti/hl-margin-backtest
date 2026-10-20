@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 import sys
 import zipfile
 
@@ -93,6 +94,7 @@ def patched(tmp_path, monkeypatch):
     monkeypatch.setattr(runmod, "OTHER_REPS", 100)
     monkeypatch.setattr(runmod.time, "sleep", lambda s: None)
     monkeypatch.setattr(sources, "hl_info", fake_info)
+    monkeypatch.setattr(sources, "hl_info_raw", lambda body: json.dumps(fake_info(body)).encode())
     monkeypatch.setattr(sources, "binance_kline_symbols", lambda: {"AAAUSDT", "1000BBBUSDT"})
     monkeypatch.setattr(sources, "monthly_klines_zip", fake_zip)
     return tmp_path

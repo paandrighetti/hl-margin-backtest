@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import io
 import json
 import time
@@ -37,7 +38,7 @@ def _get(url: str, body: dict | None = None, tries: int = 5) -> bytes:
                 raise NotFound(url) from e
             if attempt == tries - 1:
                 raise
-        except (urllib.error.URLError, TimeoutError, ConnectionError):
+        except (OSError, http.client.HTTPException):  # URLError, timeouts, resets, SSL errors, cut-off bodies
             if attempt == tries - 1:
                 raise
         time.sleep(min(60, 5 * 2**attempt))
@@ -46,6 +47,11 @@ def _get(url: str, body: dict | None = None, tries: int = 5) -> bytes:
 
 def hl_info(body: dict) -> object:
     return json.loads(_get(HL_INFO, body))
+
+
+def hl_info_raw(body: dict) -> bytes:
+    """The response bytes as received, for the snapshots the protocol keeps."""
+    return _get(HL_INFO, body)
 
 
 INTERVAL_MS = {"4h": 4 * 3_600_000, "1d": 86_400_000}

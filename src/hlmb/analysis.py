@@ -74,7 +74,7 @@ def oct10(asset: str, mmr: float, grid: np.ndarray, start: int) -> list[dict]:
     for h in OCT10_HORIZONS:
         for (measure, side), move in worst_moves(grid, start, start + 120, h).items():
             row = {"asset": asset, "horizon_min": h, "measure": measure, "side": side, "worst_move": move}
-            row.update({f"breach_{k}": move > b for k, b in buffers(mmr).items()})
+            row.update({f"breach_{k}": None if np.isnan(move) else bool(move > b) for k, b in buffers(mmr).items()})
             rows.append(row)
     return rows
 

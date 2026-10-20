@@ -37,7 +37,7 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=ROOT / "outputs")
     ap.add_argument("--cache", type=Path, default=ROOT / "cache")
     args = ap.parse_args()
-    params = pd.read_csv(args.out / "params.csv").set_index("asset")
+    params = pd.read_csv(args.out / "params.csv", float_precision="round_trip").set_index("asset")
     manifest = pd.read_csv(args.out / "manifest.csv")
     coverage = pd.read_csv(args.out / "coverage.csv")
     primary = pd.read_csv(args.out / "primary.csv")

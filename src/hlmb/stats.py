@@ -30,8 +30,10 @@ def transitions(exceptions: np.ndarray, valid: np.ndarray) -> tuple[int, int, in
 def christoffersen(n00: int, n01: int, n10: int, n11: int) -> tuple[float, float]:
     """Independence likelihood ratio (Christoffersen, 1998) and its chi-square(1) p-value."""
     n = n00 + n01 + n10 + n11
-    if n == 0 or n01 + n11 == 0:
+    if n == 0:
         return np.nan, np.nan
+    if n01 + n11 == 0:  # no exception after a valid window: no dependence to detect
+        return 0.0, 1.0
     pi = (n01 + n11) / n
     pi0 = n01 / (n00 + n01) if n00 + n01 else 0.0
     pi1 = n11 / (n10 + n11) if n10 + n11 else 0.0

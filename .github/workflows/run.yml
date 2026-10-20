@@ -19,6 +19,7 @@ jobs:
       - run: pip install -e ".[dev]" && pytest -q
       - name: Guard and start mark
         run: |
+          git pull --rebase
           python scripts/run.py --phase guard
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -30,10 +31,19 @@ jobs:
         run: python scripts/run.py --phase compute
       - name: Independent recount
         if: always()
-        run: test -f outputs/primary.csv && python scripts/recompute.py || echo "no results to recount"
+        run: if [ -f outputs/primary.csv ]; then python scripts/recompute.py; fi
       - name: Report
         if: always()
-        run: test -f outputs/recompute.csv && python scripts/build_report.py || echo "no report"
+        run: if [ -f outputs/primary.csv ]; then python scripts/build_report.py; fi
+      - name: Keep the outputs as an artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: outputs
+          path: |
+            outputs
+            REPORT.md
+          if-no-files-found: ignore
       - name: Commit outputs
         if: always()
         run: |

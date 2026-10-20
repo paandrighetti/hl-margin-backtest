@@ -35,8 +35,8 @@ def build(out: Path) -> str:
     prim = pd.read_csv(out / "primary.csv")
     hor = pd.read_csv(out / "horizons.csv")
     oct10 = pd.read_csv(out / "oct10.csv")
-    proxy = pd.read_csv(out / "proxy.csv")
-    hlp = json.loads((out / "hlp_summary.json").read_text())
+    proxy = pd.read_csv(out / "proxy.csv") if (out / "proxy.csv").exists() else None
+    hlp = json.loads((out / "hlp_summary.json").read_text()) if (out / "hlp_summary.json").exists() else None
     manifest = pd.read_csv(out / "manifest.csv")
     recount = pd.read_csv(out / "recompute.csv") if (out / "recompute.csv").exists() else None
 
@@ -45,7 +45,7 @@ def build(out: Path) -> str:
     n_assets, n_sides = len(inc), len(prim)
     counts = prim.classification.value_counts()
     hor["max_leverage"] = hor.asset.map(lev)
-    corr_median = proxy.return_correlation.median()
+    corr_median = proxy.return_correlation.median() if proxy is not None else float("nan")
     proxy_ok = corr_median >= 0.95
 
     lines = [
@@ -66,21 +66,37 @@ def build(out: Path) -> str:
         f"European central counterparties must cover two business days for exchange-traded derivatives "
         "(Commission Delegated Regulation (EU) No 153/2013, article 26)."),
     ]
-    b5 = oct10[(oct10.horizon_min == 5)].groupby("asset")[["breach_B1"]].any()
-    b5m1 = oct10[(oct10.horizon_min == 5) & (oct10.measure == "M1")].groupby("asset").breach_B1.any()
+    known = oct10.dropna(subset=["worst_move"])
+    missing = oct10.asset.nunique() - known.asset.nunique()
+    b5 = known[known.horizon_min == 5].groupby("asset").breach_B1.agg(lambda x: bool(x.astype(bool).any()))
+    b5m1 = known[(known.horizon_min == 5) & (known.measure == "M1")].groupby("asset").breach_B1.agg(
+        lambda x: bool(x.astype(bool).any()))
     lines.append(
-        f"- 10 October 2025, 20:00 to 22:00 UTC: {int(b5m1.sum())} of {len(b5m1)} assets moved beyond their "
-        f"maintenance margin at the end of some 5-minute window, {int(b5.breach_B1.sum())} at some point inside one.")
-    lines.append(
-        f"- Proxy: median correlation of 4-hour returns between Hyperliquid and Binance {corr_median:.3f} over "
-        f"{len(proxy)} assets; " + ("the proxy passes the protocol's gate." if proxy_ok else
-                                   "below the protocol's 0.95 gate: every result is Binance-based only."))
+        f"- 10 October 2025, 20:00 to 22:00 UTC: {int(b5m1.sum())} of {len(b5m1)} assets with complete data moved "
+        f"beyond their maintenance margin at the end of some 5-minute window, {int(b5.sum())} at some point inside "
+        f"one ({missing} assets lack a minute of that period).")
+    if proxy is None:
+        lines.append("- Proxy check: not available (run.log gives the error).")
+    else:
+        lines.append(
+            f"- Proxy: median correlation of 4-hour returns between Hyperliquid and Binance {corr_median:.3f} over "
+            f"{len(proxy)} assets; " + ("the proxy passes the protocol's gate." if proxy_ok else
+                                       "below the protocol's 0.95 gate: every result is Binance-based only."))
     lines += ["", "## 2. Data", ""]
     excl = params[params.status != "included"].status.value_counts()
     lines += [f"- Assets in the `meta` snapshot: {len(params)}; included: {n_assets}."]
     lines += [f"- Excluded ({k.removeprefix('excluded: ')}): {v}." for k, v in excl.items()]
     st = manifest.status.value_counts()
     lines += [f"- Asset-months: {len(manifest)}; " + ", ".join(f"{k}: {v}" for k, v in st.items()) + "."]
+    ex = params[params.status != "included"]
+    lines += ["", "Excluded assets:", "",
+              table(pd.DataFrame({"Asset": ex.asset, "Reason": ex.status.str.removeprefix("excluded: ")})), ""]
+    failed = manifest[~manifest.status.isin(["ok", "absent"])]
+    if len(failed):
+        lines += ["Months that failed a gate:", "",
+                  table(pd.DataFrame({"Asset": failed.asset, "Month": failed.month, "Reason": failed.status})), ""]
+    lines += [("Parameter changes during the sample are listed in `docs/PARAMETER_CHANGES.md`: the run applies the "
+              "parameters of its snapshot to the whole sample (protocol 2)."), ""]
 
     lines += ["", "## 3. Coverage by horizon", "",
               "Share of asset-sides whose achieved coverage is at least 99%, and median coverage.", ""]
@@ -94,7 +110,10 @@ def build(out: Path) -> str:
     lines += [table(pd.DataFrame(rows)), ""]
 
     lines += ["## 4. Primary cell by asset", "",
-              "M1, maintenance margin rate, 5-minute windows. Interval: 95% stationary bootstrap of days.", ""]
+              ("M1, maintenance margin rate, 5-minute windows. Interval: 95% stationary bootstrap of days. The "
+               "intervals of every other M1 cell under the maintenance margin rate are in `outputs/intervals.csv`; "
+               "protocol 6's \"other M1 cells\" is read as those under B1, the buffer of h*, since its seed order "
+               "has no buffer key."), ""]
     p = prim.merge(inc[["asset", "max_leverage", "mmr"]], on="asset").sort_values("exception_rate", ascending=False)
     p_tab = pd.DataFrame({
         "Asset": p.asset, "Side": p.side, "Max leverage": p.max_leverage.astype(int), "Margin": p.mmr.map(pct),
@@ -137,8 +156,8 @@ def build(out: Path) -> str:
     lines += [table(pd.DataFrame(rows)), ""]
 
     lines += ["## 8. Proxy check", ""]
-    pr = proxy.dropna(subset=["return_correlation"])
-    lines += [table(pd.DataFrame({
+    pr = proxy.dropna(subset=["return_correlation"]) if proxy is not None else pd.DataFrame()
+    lines += ["- Not available." if proxy is None else table(pd.DataFrame({
         "Asset": pr.asset, "4-hour windows": pr.windows, "From": pr["first"],
         "Return correlation": pr.return_correlation.map(lambda x: f"{x:.3f}"),
         "Range ratio": pr.median_range_ratio.map(lambda x: f"{x:.3f}"),
@@ -147,8 +166,14 @@ def build(out: Path) -> str:
         "10/10 low, Binance": pr.oct10_binance_long_m2.map(pct)})), ""]
 
     lines += ["## 9. HLP", ""]
+    if hlp is None:
+        lines += ["- Not available (run.log gives the error).", ""]
+        return "\n".join(lines + ["## 10. Independent recount", "", recount_line(recount), "",
+                                   "## 11. Limitations", "", "See `PROTOCOL.md`, section 11.", ""])
     lines += [(f"- History: {hlp['points']} points from {hlp['first'][:10]} to {hlp['last'][:10]}, median spacing "
-              f"{hlp['median_spacing_days']:.2f} days."),
+              f"{hlp['median_spacing_days']:.2f} days. Returns start at {hlp['first_period_used'][:10]}, once the "
+              f"vault held at least 1% of its median account value (first account value "
+              f"{hlp['first_account_value']:,.0f} USDC; this rule was not foreseen by the protocol)."),
               (f"- Annualised return {pct(hlp['annual_return'])}, annualised volatility {pct(hlp['annual_volatility'])}, "
               f"maximum drawdown {pct(hlp['max_drawdown'])}.")]
     if hlp.get("oct10_period"):
@@ -163,14 +188,16 @@ def build(out: Path) -> str:
     else:
         lines.append(f"- {hlp['test']}.")
 
-    lines += ["", "## 10. Independent recount", ""]
-    if recount is None:
-        lines.append("- Not available.")
-    else:
-        lines.append(f"- {len(recount)} cells recounted for {recount.asset.nunique()} assets; "
-                     f"{int((~recount.match).sum())} mismatches.")
+    lines += ["", "## 10. Independent recount", "", recount_line(recount)]
     lines += ["", "## 11. Limitations", "", "See `PROTOCOL.md`, section 11.", ""]
     return "\n".join(lines)
+
+
+def recount_line(recount: pd.DataFrame | None) -> str:
+    if recount is None:
+        return "- Not available."
+    return (f"- {len(recount)} cells recounted for {recount.asset.nunique()} assets; "
+            f"{int((~recount.match).sum())} mismatches.")
 
 
 def main() -> None:

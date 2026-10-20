@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -71,8 +72,7 @@ class Run:
         if not (self.out / "run.started").exists() or (self.out / "coverage.csv").exists():
             sys.exit("compute needs a start mark and no previous results: stopping")
 
-    def save_json(self, name: str, obj: object) -> str:
-        blob = json.dumps(obj, indent=1, sort_keys=True).encode()
+    def save_raw(self, name: str, blob: bytes) -> str:
         (self.out / "raw" / name).write_bytes(blob)
         return sources.sha256(blob)
 
@@ -107,8 +107,13 @@ def identity(asset: str, grid: np.ndarray, grid_start: int) -> tuple[float, int]
     return float(np.corrcoef([hl[d] for d in days], c[days] / o[days] - 1)[0, 1]), len(days)
 
 
-def primary_and_horizons(daily: dict, assets: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    prim, hor = [], []
+def primary_and_horizons(daily: dict, assets: list[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Primary classification, horizons of coverage and the bootstrap interval of every M1 cell under B1.
+
+    "The other M1 cells" of protocol 6 are read as those under B1, the buffer of h*: the seed order of the
+    protocol, (asset name, horizon, side), has no buffer key.
+    """
+    prim, hor, intervals = [], [], []
     seed = SEED
     for asset in sorted(assets):
         upper = {}
@@ -118,8 +123,10 @@ def primary_and_horizons(daily: dict, assets: list[str]) -> tuple[pd.DataFrame, 
                 rate = x.sum() / n.sum()
                 reps_n = PRIMARY_REPS if h == PRIMARY_H else OTHER_REPS
                 reps = stats.bootstrap_rates(x, n, reps_n, seed)
-                seed += 1
                 lo, hi = np.quantile(reps, [0.025, 0.975])
+                intervals.append({"asset": asset, "horizon_min": h, "side": side, "exception_rate": rate,
+                                  "rate_lo": lo, "rate_hi": hi, "replicates": reps_n, "seed": seed})
+                seed += 1
                 upper[(h, side)] = (rate, hi)
                 if h == PRIMARY_H:
                     p_below, p_above = stats.bootstrap_pvalues(rate, reps)
@@ -137,7 +144,7 @@ def primary_and_horizons(daily: dict, assets: list[str]) -> tuple[pd.DataFrame, 
     below = stats.holm(prim["p_below_99"].to_numpy())
     above = stats.holm(prim["p_above_99"].to_numpy())
     prim["classification"] = np.where(below, "below 99%", np.where(above, "at or above 99%", "not distinguishable"))
-    return prim, pd.DataFrame(hor)
+    return prim, pd.DataFrame(hor), pd.DataFrame(intervals)
 
 
 def hor_prev(h: int) -> int:
@@ -180,23 +187,31 @@ def proxy_check(run: Run, top: list[str], fourh: dict[str, pd.DataFrame], mmr: d
 
 
 def hlp(run: Run, daily_total: pd.Series) -> dict:
-    details = sources.hl_info({"type": "vaultDetails", "vaultAddress": HLP})
-    run.save_json("hlp_vault_details.json", details)
-    hist = dict(details["portfolio"])["allTime"]
+    raw = sources.hl_info_raw({"type": "vaultDetails", "vaultAddress": HLP})
+    run.save_raw("hlp_vault_details.json", raw)
+    hist = dict(json.loads(raw)["portfolio"])["allTime"]
     av = pd.DataFrame(hist["accountValueHistory"], columns=["t_ms", "account_value"]).astype(float)
     pnl = pd.DataFrame(hist["pnlHistory"], columns=["t_ms", "pnl"]).astype(float)
     h = av.merge(pnl, on="t_ms").sort_values("t_ms").reset_index(drop=True)
     h["time"] = pd.to_datetime(h.t_ms, unit="ms", utc=True)
-    h["ret"] = h.pnl.diff() / h.account_value.shift()
-    h.to_csv(run.out / "hlp.csv", index=False)
     h["start"] = h.time.shift()
-    r = h.dropna(subset=["ret"])
+    h["start_value"] = h.account_value.shift()
+    h["ret"] = h.pnl.diff() / h.start_value
+    # A return needs a meaningful starting value: periods start once the vault holds at least 1% of its median
+    # account value, which leaves out a launch with a seed deposit (not foreseen by the protocol, stated in the
+    # report).
+    first_used = h.index[h.account_value >= 0.01 * h.account_value.median()][0]
+    h["used"] = (h.index > first_used) & (h.start_value > 0)
+    h.to_csv(run.out / "hlp.csv", index=False)
+    r = h[h.used].dropna(subset=["ret"])
     spacing_days = float((r.time - r.start).median() / pd.Timedelta(days=1))
-    index = (1 + r.ret).cumprod()
+    index = pd.concat([pd.Series([1.0]), (1 + r.ret).cumprod()], ignore_index=True)
     years = (r.time.iloc[-1] - r.start.iloc[0]) / pd.Timedelta(days=365.25)
     crash = r[(r.start < pd.Timestamp(OCT10)) & (r.time >= pd.Timestamp(OCT10))]
     summary = {
         "points": len(h), "first": str(h.time.iloc[0]), "last": str(h.time.iloc[-1]),
+        "first_account_value": float(h.account_value.iloc[0]), "periods_used": len(r),
+        "first_period_used": str(r.start.iloc[0]),
         "median_spacing_days": spacing_days,
         "annual_return": float(index.iloc[-1] ** (1 / years) - 1),
         "annual_volatility": float(r.ret.std() * np.sqrt(365.25 / spacing_days)),
@@ -236,9 +251,11 @@ def main() -> None:
     run.ready_to_compute()
     run.log("run starts")
 
-    meta = sources.hl_info({"type": "meta"})
-    ctx = sources.hl_info({"type": "metaAndAssetCtxs"})
-    run.log(f"meta sha256 {run.save_json('meta.json', meta)}; asset contexts sha256 {run.save_json('meta_and_asset_ctxs.json', ctx)}")
+    meta_raw = sources.hl_info_raw({"type": "meta"})
+    ctx_raw = sources.hl_info_raw({"type": "metaAndAssetCtxs"})
+    meta, ctx = json.loads(meta_raw), json.loads(ctx_raw)
+    run.log(f"meta sha256 {run.save_raw('meta.json', meta_raw)}; "
+            f"asset contexts sha256 {run.save_raw('meta_and_asset_ctxs.json', ctx_raw)}")
     assets = params.assets_from_meta(meta)
     oi = {a["name"]: float(c["openInterest"]) * float(c["markPx"]) for a, c in zip(ctx[0]["universe"], ctx[1])}
     available = sources.binance_kline_symbols()
@@ -295,9 +312,10 @@ def main() -> None:
     pd.DataFrame(oct_rows).to_csv(run.out / "oct10.csv", index=False)
     run.log(f"G5 passed: {len(included)} assets; coverage.csv written")
 
-    primary, horizons = primary_and_horizons(daily, included)
+    primary, horizons, intervals = primary_and_horizons(daily, included)
     primary.to_csv(run.out / "primary.csv", index=False)
     horizons.to_csv(run.out / "horizons.csv", index=False)
+    intervals.to_csv(run.out / "intervals.csv", index=False)
     days = pd.date_range(months[0] + "-01", periods=total // w.DAY_MINUTES, freq="D", tz="UTC")
     exc = sum(daily[a][(PRIMARY_H, s)][0] for a in included for s in ("long", "short"))
     obs = sum(daily[a][(PRIMARY_H, s)][1] for a in included for s in ("long", "short"))
@@ -307,12 +325,18 @@ def main() -> None:
 
     mmr = {r["asset"]: r["mmr"] for r in param_rows}
     top = sorted(included, key=lambda x: -(oi.get(x) or 0))[:PROXY_ASSETS]
-    proxy_check(run, top, fourh, mmr).to_csv(run.out / "proxy.csv", index=False)
-    run.log("proxy check written")
-
-    summary = hlp(run, daily_total)
-    (run.out / "hlp_summary.json").write_text(json.dumps(summary, indent=1))
-    run.log("HLP written; run ends")
+    try:  # after coverage.csv no restart is allowed, so one failing part must not stop the other
+        proxy_check(run, top, fourh, mmr).to_csv(run.out / "proxy.csv", index=False)
+        run.log("proxy check written")
+    except Exception:  # noqa: BLE001  (logged with its traceback; the run goes on to HLP)
+        run.log("proxy check failed:\n" + traceback.format_exc())
+    try:
+        summary = hlp(run, daily_total)
+        (run.out / "hlp_summary.json").write_text(json.dumps(summary, indent=1))
+        run.log("HLP written")
+    except Exception:  # noqa: BLE001  (logged with its traceback)
+        run.log("HLP failed:\n" + traceback.format_exc())
+    run.log("run ends")
 
 
 if __name__ == "__main__":
