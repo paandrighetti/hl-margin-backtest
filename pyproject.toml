@@ -1,0 +1,18 @@
+[project]
+name = "hlmb"
+version = "0.1.0"
+description = "Backtest of Hyperliquid maintenance margins against price moves, in the style of central counterparty margin back-testing"
+requires-python = ">=3.11"
+dependencies = ["numpy>=2.0", "pandas>=2.2", "scipy>=1.13"]
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "scripts"]
+
+[tool.ruff]
+line-length = 120

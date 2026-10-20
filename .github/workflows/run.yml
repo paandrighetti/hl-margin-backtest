@@ -1,0 +1,38 @@
+name: run
+# The single run of PROTOCOL.md, started by hand. The start mark is committed before any data is read, so a
+# second dispatch stops at the guard; outputs are committed by this workflow.
+on: workflow_dispatch
+permissions:
+  contents: write
+concurrency:
+  group: single-run
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]" && pytest -q
+      - name: Guard and start mark
+        run: |
+          python scripts/run.py --phase guard
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add outputs/run.started outputs/run.restarted outputs/run.log 2>/dev/null || true
+          git commit -m "Start mark of the single run (workflow run ${{ github.run_id }})"
+          git push
+      - name: Compute
+        run: python scripts/run.py --phase compute
+      - name: Independent recount
+        if: always()
+        run: test -f outputs/primary.csv && python scripts/recompute.py || echo "no results to recount"
+      - name: Commit outputs
+        if: always()
+        run: |
+          git add outputs
+          git commit -m "Outputs of the single run (workflow run ${{ github.run_id }})" || echo "nothing to commit"
+          git push
