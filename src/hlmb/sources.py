@@ -51,17 +51,19 @@ def hl_info(body: dict) -> object:
 INTERVAL_MS = {"4h": 4 * 3_600_000, "1d": 86_400_000}
 
 
-def hl_candles(coin: str, interval: str, start_ms: int, end_ms: int, pause: float = 2.0) -> list[dict]:
+def hl_candles(coin: str, interval: str, start_ms: int, end_ms: int) -> list[dict]:
     """Hyperliquid candles opening in [start_ms, end_ms], paged from the oldest.
 
     Time-range responses can be capped (Hyperliquid documentation, Info endpoint), so each page restarts after
-    the last candle received. The pause keeps the request weight under 1,200 per minute.
+    the last candle received. A candle request weighs 20 plus one per 60 candles returned, against a limit of
+    1,200 per minute per address (Rate limits and user limits); the pause after each page keeps the pace under
+    1,000 per minute.
     """
     out: list[dict] = []
     while start_ms <= end_ms:
         page = hl_info({"type": "candleSnapshot",
                         "req": {"coin": coin, "interval": interval, "startTime": start_ms, "endTime": end_ms}})
-        time.sleep(pause)
+        time.sleep(60 * (20 + len(page) / 60) / 1000)
         page = [c for c in page if start_ms <= int(c["t"]) <= end_ms]
         if not page:
             break
