@@ -29,6 +29,16 @@ def horizon_label(m: int) -> str:
     return "none" if m == 0 else (f"{m // 60} h" if m >= 60 and m % 60 == 0 else f"{m} min")
 
 
+def reason(status: str) -> str:
+    """A status without its figures, so that statuses of one kind are counted together (the tables keep them)."""
+    s = status.removeprefix("excluded: ")
+    if s.endswith("months pass the gates"):
+        return "too few months pass the gates"
+    if s.startswith("G4 "):
+        return "G4, too few minutes present"
+    return s.split(" (")[0]
+
+
 def build(out: Path) -> str:
     params = pd.read_csv(out / "params.csv")
     cov = pd.read_csv(out / "coverage.csv")
@@ -83,10 +93,10 @@ def build(out: Path) -> str:
             f"{len(proxy)} assets; " + ("the proxy passes the protocol's gate." if proxy_ok else
                                        "below the protocol's 0.95 gate: every result is Binance-based only."))
     lines += ["", "## 2. Data", ""]
-    excl = params[params.status != "included"].status.value_counts()
+    excl = params[params.status != "included"].status.map(reason).value_counts()
     lines += [f"- Assets in the `meta` snapshot: {len(params)}; included: {n_assets}."]
-    lines += [f"- Excluded ({k.removeprefix('excluded: ')}): {v}." for k, v in excl.items()]
-    st = manifest.status.value_counts()
+    lines += [f"- Excluded ({k}): {v}." for k, v in excl.items()]
+    st = manifest.status.map(reason).value_counts()
     lines += [f"- Asset-months: {len(manifest)}; " + ", ".join(f"{k}: {v}" for k, v in st.items()) + "."]
     ex = params[params.status != "included"]
     lines += ["", "Excluded assets:", "",
@@ -146,11 +156,14 @@ def build(out: Path) -> str:
 
     lines += ["## 7. Standard tests", "",
               ("Share of cells where the test rejects at 5%. These tests assume independent exceptions and decide "
-              "nothing (protocol 6)."), ""]
+              "nothing (protocol 6). Kupiec's test rejects too few exceptions as well as too many; the next column "
+              "gives the share of its rejections where the exception rate is below 1%."), ""]
     rows = []
     for (m, b), gg in cov.groupby(["measure", "buffer"]):
+        rejects = gg.kupiec_p < 0.05
         rows.append({"Measure": m, "Buffer": b, "Cells": len(gg),
-                     "Kupiec": pct((gg.kupiec_p < 0.05).mean(), 1),
+                     "Kupiec": pct(rejects.mean(), 1),
+                     "Kupiec rejections below 1%": pct((gg.exception_rate[rejects] < 0.01).mean(), 1),
                      "Christoffersen independence": pct((gg.christoffersen_ind_p < 0.05).mean(), 1),
                      "Conditional coverage": pct((gg.christoffersen_cc_p < 0.05).mean(), 1)})
     lines += [table(pd.DataFrame(rows)), ""]
