@@ -18,8 +18,9 @@ breaches and HLP's returns.
 
 - `PROTOCOL.md` was frozen before any real data was read; `PROTOCOL.sha256` holds its hash and `scripts/run.py`
   refuses to run if the protocol changed.
-- The run happens once, in the `run` workflow of this repository, which commits a start mark before reading any
-  data and commits the outputs at the end. Results will appear in `outputs/` and in `REPORT.md`.
+- The single run took place on 21 October 2026 in the `run` workflow of this repository (run 39579867531): its
+  start mark (commit `92b910f`) was committed before any data was read, and its outputs at the end (commit
+  `e3008aa`). [`REPORT.md`](REPORT.md) is generated from `outputs/`; its section 10 gives the independent recount.
 
 ## Method in brief
 
